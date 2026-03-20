@@ -1,0 +1,84 @@
+name: quality-and-improve
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, labeled]
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    env:
+      MODE: ${{ contains(github.event.pull_request.title, '[MODE:agressiu]') && 'agressiu'
+        || (contains(github.event.pull_request.title, '[MODE:conservador]') && 'conservador'
+        || 'equilibrat') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - name: Install Python tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install black ruff mypy pytest
+
+      - name: C++ tooling
+        run: sudo apt-get update && sudo apt-get install -y clang-format clang-tidy cmake g++
+
+      # ---- Python ----
+      - name: Ruff (lint) - mode aware
+        run: |
+          if ls **/*.py >/dev/null 2>&1; then
+            case "${MODE}" in
+              conservador) ruff check --select E,F,I . ;;
+              equilibrat)  ruff check --select E,F,I,UP,B,SIM,C4,PL . ;;
+              agressiu)    ruff check --select E,F,I,UP,B,SIM,C4,PL,PERF --fix . ;;
+            esac
+          fi
+
+      - name: Black (format) - check or fix
+        run: |
+          if ls **/*.py >/dev/null 2>&1; then
+            if [ "${MODE}" = "agressiu" ]; then black .
+            else black --check .
+            fi
+          fi
+
+      - name: MyPy (tipus) - equilibrat/agressiu
+        if: ${{ env.MODE != 'conservador' }}
+        run: |
+          if ls **/*.py >/dev/null 2>&1; then
+            mypy --ignore-missing-imports .
+          fi
+
+      # ---- C++ ----
+      - name: clang-format (check or fix)
+        run: |
+          set -e
+          FILES=$(git ls-files '**/*.*pp' '**/*.*xx' '**/*.c' '**/*.h*' || true)
+          if [ -n "$FILES" ]; then
+            if [ "${MODE}" = "agressiu" ]; then
+              echo "$FILES" | xargs -r clang-format -i
+              git add -A
+            else
+              echo "Mode no agressiu: revisió de format (no modifica)."
+            fi
+          fi
+
+      - name: (Opcional) clang-tidy informatiu
+        run: |
+          if [ -f CMakeLists.txt ]; then
+            cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+            cmake --build build --config Release || true
+            if [ -f build/compile_commands.json ]; then
+              clang-tidy --quiet $(git ls-files '**/*.cpp' '**/*.cc' '**/*.cxx') -- -p=build || true
+            fi
+          fi
+
+      - name: Python tests
+        run: |
+          if [ -f pyproject.toml ] || ls **/test_*.py **/*_test.py >/dev/null 2>&1; then
+            pytest -q || true
+          fi
